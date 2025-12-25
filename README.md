@@ -22,7 +22,6 @@ This project performs modded-nanogpt speedruns across multiple seeds and evaluat
 ```bash
 git clone https://github.com/ejmichaud/discreteness.git
 cd discreteness
-git submodule update --init --recursive
 ```
 
 #### 2. Install uv (fast Python package manager)
@@ -130,7 +129,7 @@ If you see `StopIteration` errors:
 ```
 discreteness/
 ├── README.md                    # This file
-└── modded-nanogpt/             # Submodule: modded-nanogpt speedrun
+└── modded-nanogpt/             # Vendored copy of modded-nanogpt speedrun
     ├── train_gpt.py            # Main training script
     ├── train_gpt_medium.py     # GPT-2 Medium track
     ├── data/                   # Dataset download scripts
