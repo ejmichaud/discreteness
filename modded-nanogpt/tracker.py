@@ -88,6 +88,13 @@ class EvalTracker:
         self.tgt = torch.cat(tgt_parts)
         self.seqlens = torch.tensor(seqlens, dtype=torch.int32, device=device)
         
+        # Pad to multiple of 16 (required by attention kernel)
+        self.orig_len = len(self.inp)
+        pad_len = (16 - self.orig_len % 16) % 16
+        if pad_len > 0:
+            self.inp = torch.cat([self.inp, torch.zeros(pad_len, dtype=torch.long, device=device)])
+            self.tgt = torch.cat([self.tgt, torch.zeros(pad_len, dtype=torch.long, device=device)])
+        
         # Results: step -> list of per-doc loss tensors
         self.results: dict[int, list[Tensor]] = {}
         
@@ -106,7 +113,7 @@ class EvalTracker:
     
     def record(self, step: int, losses: Tensor):
         """Split and store per-token losses by document."""
-        losses = losses.cpu()
+        losses = losses[:self.orig_len].cpu()  # Remove padded positions
         doc_losses = torch.split(losses, self.doc_lengths)
         self.results[step] = [l.half() for l in doc_losses]
     
