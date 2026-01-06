@@ -1,0 +1,33 @@
+The month after January is February.
+The month after May is June.
+The month after February is March.
+The month after June is July.
+The month after December is January.
+The month after September is October.
+The month after August is September.
+The month after November is December.
+The month after April is May.
+The month after October is November.
+The month after July is August.
+The month after March is April.
+
+The day after Tuesday is Wednesday.
+The day after Monday is Tuesday.
+The day after Friday is Saturday.
+The day after Saturday is Sunday.
+The day after Wednesday is Thursday.
+The day after Sunday is Monday.
+The day after Thursday is Friday.
+
+March is the third month of the year.
+June is the sixth month of the year.
+November is the eleventh month of the year.
+April is the fourth month of the year.
+January is the first month of the year.
+August is the eighth month of the year.
+February is the second month of the year.
+May is the fifth month of the year.
+October is the tenth month of the year.
+December is the twelfth month of the year.
+July is the seventh month of the year.
+September is the ninth month of the year.

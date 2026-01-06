@@ -33,6 +33,8 @@ from torch import Tensor, nn
 
 dynamo.config.recompile_limit = 64
 
+from tracker import EvalTracker
+
 # -----------------------------------------------------------------------------
 # Custom operators: FP8 matmul by @YouJiacheng
 
@@ -1182,7 +1184,7 @@ class GPT(nn.Module):
 
         self.split_embed = False
 
-    def forward(self, input_seq: Tensor, target_seq: Tensor, seqlens: Tensor, schedule_cfg: ForwardScheduleConfig):
+    def forward(self, input_seq: Tensor, target_seq: Tensor, seqlens: Tensor, schedule_cfg: ForwardScheduleConfig, per_token: bool = False):
         assert input_seq.ndim == 1
 
         # unpack schedule_cfg
@@ -1281,6 +1283,8 @@ class GPT(nn.Module):
             loss = (cross_entropy * mtp_weights).sum()
         elif self.training:
             loss = F.cross_entropy(logits_for_loss.view(-1, logits_for_loss.size(-1)), target_seq, reduction="sum")
+        elif per_token:
+            loss = F.cross_entropy(logits_for_loss.view(-1, logits_for_loss.size(-1)), target_seq, reduction="none")
         else:
             loss = F.cross_entropy(logits_for_loss.view(-1, logits_for_loss.size(-1)), target_seq, reduction="mean")
         return loss
@@ -1694,6 +1698,7 @@ class Hyperparameters:
     split_embed_frac: float = 2/3  # fraction of training when embeddings split from lm_head
     # evaluation and logging
     run_id: str = f"{uuid.uuid4()}"
+    seed: int | None = None  # random seed for reproducibility (None = random)
     val_loss_every: int = 250  # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint: bool = False
     # attention masking
@@ -1703,6 +1708,11 @@ class Hyperparameters:
     ws_validate_post_yarn_ext: int = 20 # extend long windows out even further after applying YaRN
 
 args = Hyperparameters()
+
+# Parse command line arguments (simple parsing to avoid argparse complexity with torchrun)
+for arg in sys.argv[1:]:
+    if arg.startswith("--seed="):
+        args.seed = int(arg.split("=")[1])
 
 data_path = os.environ.get("DATA_PATH", ".")
 args.train_files = os.path.join(data_path, args.train_files)
@@ -1748,6 +1758,13 @@ def nvidia_smi():
 print0(nvidia_smi())
 print0("="*100)
 
+# Set random seed for reproducibility
+if args.seed is not None:
+    torch.manual_seed(args.seed)
+    print0(f"Using seed: {args.seed}", console=True)
+else:
+    print0("Using random seed", console=True)
+
 model: nn.Module = GPT(
     vocab_size=50257,
     num_layers=11,
@@ -1766,6 +1783,13 @@ for param in model.parameters():
 
 model: nn.Module = torch.compile(model, dynamic=False, fullgraph=True)
 training_manager = TrainingManager(model)
+
+# Initialize eval tracker for per-token loss recording on custom documents
+eval_tracker = EvalTracker(
+    doc_dir="eval_docs/",
+    eval_steps=list(range(args.num_iterations + 1)),  # evaluate at every step
+    device=device,
+)
 
 ########################################
 #            Warmup kernels            #
@@ -1819,6 +1843,16 @@ train_steps = args.num_iterations
 for step in range(train_steps + 1):
     last_step = (step == train_steps)
     training_manager.advance_schedule(step)
+    
+    # --------------- EVAL TRACKER (per-token losses) -----------------
+    if eval_tracker.should_eval(step):
+        model.eval()
+        with torch.no_grad():
+            inp, tgt, seqlens = eval_tracker.get_batch()
+            losses = model(inp, tgt, seqlens, training_manager.get_forward_args(), per_token=True)
+            eval_tracker.record(step, losses)
+        model.train()
+    
     # --------------- VALIDATION SECTION -----------------
     if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
         if last_step:
@@ -1868,4 +1902,9 @@ for step in range(train_steps + 1):
 
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
+
+# Save per-token eval losses
+if master_process:
+    eval_tracker.save(f"logs/{run_id}_eval_losses.pt")
+
 dist.destroy_process_group()

@@ -1,0 +1,36 @@
+ A B A B A B A B A B A B A B A B
+
+ C D E C D E C D E C D E C D E C D E
+
+ A B C D E F G H I J K L M N O P Q R S T U V W X Y Z
+
+ a B c D e F g H i J k L m N o P q R s T u V w X y Z
+
+ a b C d e F g h I j k L m n O p q R s t U v w X y z
+
+ hello quiz tree pizza furry island block
+ tree pizza furry hello quiz tree island block
+
+ orange Orange
+ apple Apple
+ banana Banana
+ cherry Cherry
+ pear Pear
+ guitar Guitar
+ 
+ hi -> h i
+ dog -> d o g
+ cat -> c a t
+ candy -> c a n d y
+ olive -> o l i v e 
+ maple -> m a p l e
+ chocolate -> c h o c o l a t e
+ strawberry -> s t r a w b e r r y
+ kangaroo -> k a n g a r o o
+ quixotic -> q u i x o t i c
+ superluminal -> s u p e r l u m i n a l
+ psychoneuroimmunology -> p s y c h o n e u r o i m m u n o l o g y
+
+ A B A B A B A B A B A B A B A B
+
+ C D E C D E C D E C D E C D E C D E
