@@ -1714,6 +1714,10 @@ for arg in sys.argv[1:]:
     if arg.startswith("--seed="):
         args.seed = int(arg.split("=")[1])
 
+# Update run_id to include seed for easier tracking
+if args.seed is not None:
+    args.run_id = f"seed{args.seed}_{args.run_id}"
+
 data_path = os.environ.get("DATA_PATH", ".")
 args.train_files = os.path.join(data_path, args.train_files)
 args.val_files = os.path.join(data_path, args.val_files)
