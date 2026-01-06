@@ -29,7 +29,7 @@ for seed in $(seq $START_SEED $END_SEED); do
     # Check if this seed already completed (look for eval_losses file)
     if ls logs/seed${seed}_*_eval_losses.pt 1> /dev/null 2>&1; then
         echo "[Seed $seed] Already completed, skipping..."
-        ((skipped++))
+        ((++skipped))
         continue
     fi
     
@@ -44,7 +44,7 @@ for seed in $(seq $START_SEED $END_SEED); do
     
     torchrun --standalone --nproc_per_node=8 train_gpt.py --seed=$seed
     
-    ((completed++))
+    ((++completed))
     echo "[Seed $seed] Completed at $(date)"
 done
 
