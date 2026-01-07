@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
 """
-Web app to visualize per-token loss curves from eval tracker output.
+Web app to visualize per-token loss curves across multiple seeds.
 
 Usage:
-    python loss_viewer.py logs/run_id_eval_losses.pt
-    python loss_viewer.py logs/run_id_eval_losses.pt --port 8080
+    python loss_viewer.py logs/aggregated.h5
+    python loss_viewer.py logs/aggregated.h5 --port 8080
 """
 
 import argparse
-import json
 from flask import Flask, render_template_string, jsonify
-import torch
+import h5py
+import numpy as np
 import tiktoken
 
 app = Flask(__name__)
 TOKENIZER = tiktoken.get_encoding("gpt2")
 BOS_ID = 50256
 
-# Global state loaded from file
-DATA = {}
+# Global state
+H5_FILE = None
+DOC_NAMES = []
+DOC_LENGTHS = []
+EVAL_STEPS = []
+SEEDS = []
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -26,6 +30,8 @@ HTML_TEMPLATE = """
 <head>
     <title>Token Loss Viewer</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
@@ -40,9 +46,8 @@ HTML_TEMPLATE = """
             margin: 0 auto;
         }
         
-        /* Chart section - top */
         .chart-section {
-            margin-bottom: 40px;
+            margin-bottom: 30px;
         }
         
         .chart-header {
@@ -56,6 +61,12 @@ HTML_TEMPLATE = """
             font-size: 14px;
         }
         
+        .chart-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
         select {
             font-family: inherit;
             font-size: 14px;
@@ -66,18 +77,36 @@ HTML_TEMPLATE = """
             cursor: pointer;
         }
         
+        button {
+            font-family: inherit;
+            font-size: 12px;
+            padding: 6px 10px;
+            border: 1px solid #ccc;
+            background: #fff;
+            color: #000;
+            cursor: pointer;
+        }
+        button:hover { background: #f0f0f0; }
+        
         .chart-area {
-            height: 300px;
+            height: 375px;
             position: relative;
         }
         
-        #chart {
+        .chart-area-small {
+            height: 220px;
+            position: relative;
+        }
+        
+        #chart, #histogram {
             position: absolute;
             top: 0;
             left: 0;
             width: 100% !important;
-            height: 300px !important;
         }
+        
+        #chart { height: 375px !important; }
+        #histogram { height: 220px !important; }
         
         #chart-placeholder {
             position: absolute;
@@ -95,7 +124,23 @@ HTML_TEMPLATE = """
             text-align: center;
         }
         
-        /* Document section - bottom */
+        .zoom-hint {
+            font-size: 11px;
+            color: #999;
+            text-align: center;
+            margin-top: 5px;
+        }
+        
+        .histogram-section {
+            margin-bottom: 30px;
+        }
+        
+        .histogram-title {
+            font-size: 13px;
+            color: #666;
+            margin-bottom: 10px;
+        }
+        
         .doc-section {
             background: #fff;
             border: 1px solid #000;
@@ -126,24 +171,33 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="page">
-        <!-- Chart at top -->
         <div class="chart-section">
             <div class="chart-header">
-                <div class="chart-title" id="chart-title">Click a token to see its loss curve</div>
-                <select id="doc-select" onchange="loadDocument()">
-                    {% for doc in docs %}
-                    <option value="{{ loop.index0 }}">{{ doc }}</option>
-                    {% endfor %}
-                </select>
+                <div class="chart-title" id="chart-title">Click a token to see loss curves ({{ num_seeds }} seeds)</div>
+                <div class="chart-controls">
+                    <button onclick="resetZoom()" id="reset-btn" style="display:none;">Reset Zoom</button>
+                    <select id="doc-select" onchange="loadDocument()">
+                        {% for doc in docs %}
+                        <option value="{{ loop.index0 }}">{{ doc }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
             </div>
             <div class="chart-area">
-                <canvas id="chart" style="display:none; width:100%; height:100%;"></canvas>
+                <canvas id="chart" style="display:none;"></canvas>
                 <div id="chart-placeholder"></div>
             </div>
+            <div class="zoom-hint" id="zoom-hint" style="display:none;">Drag to zoom · Double-click to reset</div>
             <div class="stats" id="stats"></div>
         </div>
         
-        <!-- Document below -->
+        <div class="histogram-section" id="histogram-section" style="display:none;">
+            <div class="histogram-title">Final Loss Distribution</div>
+            <div class="chart-area-small">
+                <canvas id="histogram"></canvas>
+            </div>
+        </div>
+        
         <div class="doc-section">
             <div class="tokens-container" id="tokens"></div>
         </div>
@@ -151,8 +205,10 @@ HTML_TEMPLATE = """
     
     <script>
         let chart = null;
+        let histogramChart = null;
         let currentDoc = 0;
         let tokensData = [];
+        const numSeeds = {{ num_seeds }};
         
         async function loadDocument() {
             currentDoc = parseInt(document.getElementById('doc-select').value);
@@ -176,7 +232,6 @@ HTML_TEMPLATE = """
                 span.onclick = () => selectToken(idx, span);
                 container.appendChild(span);
                 
-                // Add actual line break after newline tokens
                 if (tok.is_newline) {
                     container.appendChild(document.createElement('br'));
                 }
@@ -186,13 +241,19 @@ HTML_TEMPLATE = """
         function clearChart() {
             document.getElementById('chart').style.display = 'none';
             document.getElementById('chart-placeholder').style.display = 'block';
-            document.getElementById('chart-title').textContent = 'Click a token to see its loss curve';
+            document.getElementById('chart-title').textContent = `Click a token to see loss curves (${numSeeds} seeds)`;
             document.getElementById('stats').textContent = '';
+            document.getElementById('zoom-hint').style.display = 'none';
+            document.getElementById('reset-btn').style.display = 'none';
+            document.getElementById('histogram-section').style.display = 'none';
             document.querySelectorAll('.token.selected').forEach(el => el.classList.remove('selected'));
         }
         
+        function resetZoom() {
+            if (chart) chart.resetZoom();
+        }
+        
         async function selectToken(idx, element) {
-            // Can't show loss for first token (no prediction)
             if (idx === 0) return;
             
             document.querySelectorAll('.token.selected').forEach(el => el.classList.remove('selected'));
@@ -203,38 +264,66 @@ HTML_TEMPLATE = """
             
             document.getElementById('chart-placeholder').style.display = 'none';
             document.getElementById('chart').style.display = 'block';
+            document.getElementById('zoom-hint').style.display = 'block';
+            document.getElementById('reset-btn').style.display = 'inline-block';
+            document.getElementById('histogram-section').style.display = 'block';
             document.getElementById('chart-title').textContent = 
-                `"${tokensData[idx].display}" at position ${idx}`;
+                `"${tokensData[idx].display}" at position ${idx} (${numSeeds} seeds)`;
             
-            const stats = `Final: ${data.losses[data.losses.length-1].toFixed(3)} | ` +
-                         `Min: ${Math.min(...data.losses).toFixed(3)} | ` +
-                         `Max: ${Math.max(...data.losses).toFixed(3)}`;
-            document.getElementById('stats').textContent = stats;
+            // Compute stats across all seeds at final step
+            const finalLosses = data.losses.map(l => l[l.length - 1]);
+            const mean = finalLosses.reduce((a, b) => a + b, 0) / finalLosses.length;
+            const std = Math.sqrt(finalLosses.map(x => (x - mean) ** 2).reduce((a, b) => a + b, 0) / finalLosses.length);
+            
+            document.getElementById('stats').textContent = 
+                `Final step — Mean: ${mean.toFixed(3)} | Std: ${std.toFixed(3)}`;
             
             renderChart(data.steps, data.losses);
+            renderHistogram(finalLosses);
         }
         
-        function renderChart(steps, losses) {
+        function renderChart(steps, allLosses) {
             const ctx = document.getElementById('chart').getContext('2d');
             
             if (chart) chart.destroy();
+            
+            // Create one dataset per seed, all with low alpha black lines
+            const datasets = allLosses.map((losses, i) => ({
+                data: losses,
+                borderColor: 'rgba(0, 0, 0, 0.08)',
+                borderWidth: 1,
+                pointRadius: 0,
+                tension: 0,
+                fill: false
+            }));
             
             chart = new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: steps,
-                    datasets: [{
-                        data: losses,
-                        borderColor: '#000',
-                        borderWidth: 1.5,
-                        pointRadius: 0,
-                        tension: 0.1
-                    }]
+                    datasets: datasets
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
+                    animation: false,
+                    plugins: { 
+                        legend: { display: false },
+                        zoom: {
+                            zoom: {
+                                drag: {
+                                    enabled: true,
+                                    backgroundColor: 'rgba(0,0,0,0.1)',
+                                    borderColor: 'rgba(0,0,0,0.3)',
+                                    borderWidth: 1
+                                },
+                                mode: 'xy',
+                                onZoomComplete: () => {
+                                    document.getElementById('reset-btn').style.display = 'inline-block';
+                                }
+                            }
+                        }
+                    },
                     scales: {
                         x: {
                             type: 'logarithmic',
@@ -254,7 +343,66 @@ HTML_TEMPLATE = """
             });
         }
         
-        // Load first document on page load
+        function renderHistogram(finalLosses) {
+            const ctx = document.getElementById('histogram').getContext('2d');
+            
+            if (histogramChart) histogramChart.destroy();
+            
+            // Compute histogram with 30 bins
+            const min = Math.min(...finalLosses);
+            const max = Math.max(...finalLosses);
+            const numBins = 30;
+            const binWidth = (max - min) / numBins || 1;
+            
+            const bins = new Array(numBins).fill(0);
+            const binCenters = [];
+            
+            for (let i = 0; i < numBins; i++) {
+                binCenters.push(min + (i + 0.5) * binWidth);
+            }
+            
+            finalLosses.forEach(loss => {
+                let binIdx = Math.floor((loss - min) / binWidth);
+                if (binIdx >= numBins) binIdx = numBins - 1;
+                if (binIdx < 0) binIdx = 0;
+                bins[binIdx]++;
+            });
+            
+            histogramChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: binCenters.map(x => x.toFixed(2)),
+                    datasets: [{
+                        data: bins,
+                        backgroundColor: 'rgba(0, 0, 0, 0.7)',
+                        borderColor: 'rgba(0, 0, 0, 0.9)',
+                        borderWidth: 0,
+                        barPercentage: 1.0,
+                        categoryPercentage: 1.0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: {
+                            title: { display: true, text: 'Final Loss', font: { size: 11 } },
+                            grid: { display: false },
+                            ticks: { font: { size: 9 }, maxTicksLimit: 8 }
+                        },
+                        y: {
+                            title: { display: true, text: 'Count', font: { size: 11 } },
+                            grid: { color: '#eee' },
+                            ticks: { font: { size: 9 } },
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        }
+        
         loadDocument();
     </script>
 </body>
@@ -263,29 +411,22 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE, docs=DATA['doc_names'])
+    return render_template_string(HTML_TEMPLATE, docs=DOC_NAMES, num_seeds=len(SEEDS))
 
 
 @app.route('/api/tokens/<int:doc_idx>')
 def get_tokens(doc_idx):
     """Return tokenized document with display strings."""
-    # Reconstruct tokens from the stored data
-    doc_name = DATA['doc_names'][doc_idx]
-    doc_length = DATA['doc_lengths'][doc_idx]
+    doc_name = DOC_NAMES[doc_idx]
+    doc_length = DOC_LENGTHS[doc_idx]
     
-    # We need to get the actual tokens - reconstruct from first step's data
-    # The losses are for positions 1..N (predicting token i from tokens 0..i-1)
-    # So we have doc_length loss values, meaning doc_length+1 tokens total
-    
-    # Load the original document to get tokens
     doc_path = f"eval_docs/{doc_name}"
     try:
         with open(doc_path, 'r') as f:
             text = f.read()
         tokens = [BOS_ID] + TOKENIZER.encode(text)
-        tokens = tokens[:doc_length + 1]  # Match stored length
+        tokens = tokens[:doc_length + 1]
     except:
-        # Fallback: create placeholder tokens
         tokens = [BOS_ID] + [0] * doc_length
     
     result = []
@@ -297,10 +438,8 @@ def get_tokens(doc_idx):
         else:
             decoded = TOKENIZER.decode([tok_id])
             is_bos = False
-            # Check if token contains newline
             is_newline = '\n' in decoded
             if is_newline:
-                # Show carriage return symbol for newlines
                 display = decoded.replace('\n', '↵')
             else:
                 display = decoded
@@ -317,47 +456,48 @@ def get_tokens(doc_idx):
 
 @app.route('/api/loss/<int:doc_idx>/<int:token_idx>')
 def get_loss(doc_idx, token_idx):
-    """Return loss curve for a specific token position."""
-    steps = sorted(DATA['results'].keys())
-    losses = []
+    """Return loss curves for a specific token across all seeds."""
+    doc_name = DOC_NAMES[doc_idx]
     
-    for step in steps:
-        doc_losses = DATA['results'][step][doc_idx]
-        if token_idx < len(doc_losses):
-            losses.append(float(doc_losses[token_idx]))
-        else:
-            losses.append(None)
+    # Read from HDF5: [n_seeds, n_steps]
+    with h5py.File(H5_FILE, 'r') as f:
+        losses = f[f'losses/{doc_name}/token_{token_idx}'][:]
     
-    # Filter out steps with None and step 0 (can't use log(0))
-    valid = [(s, l) for s, l in zip(steps, losses) if l is not None and s > 0]
-    steps, losses = zip(*valid) if valid else ([], [])
+    # Filter out step 0 (can't use log(0))
+    steps = EVAL_STEPS.copy()
+    if steps[0] == 0:
+        steps = steps[1:]
+        losses = losses[:, 1:]
+    
+    # Convert to list of lists: [[seed0_losses], [seed1_losses], ...]
+    losses_list = losses.astype(float).tolist()
     
     return jsonify({
-        'steps': list(steps),
-        'losses': list(losses)
+        'steps': steps,
+        'losses': losses_list
     })
 
 
 def main():
-    global DATA
+    global H5_FILE, DOC_NAMES, DOC_LENGTHS, EVAL_STEPS, SEEDS
     
-    parser = argparse.ArgumentParser(description="Token loss curve viewer")
-    parser.add_argument("losses_file", help="Path to eval losses .pt file")
+    parser = argparse.ArgumentParser(description="Token loss curve viewer (HDF5)")
+    parser.add_argument("h5_file", help="Path to aggregated HDF5 file")
     parser.add_argument("--port", type=int, default=5000, help="Port to run on")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
     args = parser.parse_args()
     
-    print(f"Loading {args.losses_file}...")
-    DATA = torch.load(args.losses_file, map_location='cpu')
+    H5_FILE = args.h5_file
     
-    # Convert tensor keys to int if needed
-    if DATA['results']:
-        first_key = next(iter(DATA['results']))
-        if isinstance(first_key, torch.Tensor):
-            DATA['results'] = {int(k): v for k, v in DATA['results'].items()}
+    print(f"Loading metadata from {H5_FILE}...")
+    with h5py.File(H5_FILE, 'r') as f:
+        DOC_NAMES = [s.decode() if isinstance(s, bytes) else s for s in f['metadata/doc_names'][:]]
+        DOC_LENGTHS = f['metadata/doc_lengths'][:].tolist()
+        EVAL_STEPS = f['metadata/eval_steps'][:].tolist()
+        SEEDS = f['metadata/seeds'][:].tolist()
     
-    print(f"Loaded {len(DATA['doc_names'])} documents, {len(DATA['results'])} steps")
-    print(f"Documents: {DATA['doc_names']}")
+    print(f"Documents: {DOC_NAMES}")
+    print(f"Seeds: {len(SEEDS)}, Steps: {len(EVAL_STEPS)}")
     print(f"\nStarting server at http://{args.host}:{args.port}")
     
     app.run(host=args.host, port=args.port, debug=False)
@@ -365,4 +505,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
