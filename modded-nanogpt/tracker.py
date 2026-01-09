@@ -86,14 +86,16 @@ class EvalTracker:
         
         self.inp = torch.cat(inp_parts)
         self.tgt = torch.cat(tgt_parts)
-        self.seqlens = torch.tensor(seqlens, dtype=torch.int32, device=device)
-        
+
         # Pad to multiple of 16 (required by attention kernel)
         self.orig_len = len(self.inp)
         pad_len = (16 - self.orig_len % 16) % 16
         if pad_len > 0:
             self.inp = torch.cat([self.inp, torch.zeros(pad_len, dtype=torch.long, device=device)])
             self.tgt = torch.cat([self.tgt, torch.zeros(pad_len, dtype=torch.long, device=device)])
+            seqlens.append(seqlens[-1] + pad_len)
+        
+        self.seqlens = torch.tensor(seqlens, dtype=torch.int32, device=device)
         
         # Results: step -> list of per-doc loss tensors
         self.results: dict[int, list[Tensor]] = {}
